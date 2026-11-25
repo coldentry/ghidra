@@ -86,7 +86,7 @@ public class GhidraServer extends UnicastRemoteObject implements GhidraServerHan
 	private static String HELP_FILE = "ServerHelp.txt";
 	private static String USAGE_ARGS =
 		"[-ip <hostname>] [-i #.#.#.#] [-p#] [-n] [-a#] [-d<ad_domain>]" +
-			" [-e<days>] [-jaas <config_file>] [-u] [-autoProvision] [-anonymous] [-ssh] <repository_path>";
+			" [-e<days>] [-jaas <config_file>] [-oidc <config_file>] [-u] [-autoProvision] [-anonymous] [-ssh] <repository_path>";
 
 	private static final String RMI_SERVER_PROPERTY = "java.rmi.server.hostname";
 
@@ -96,6 +96,7 @@ public class GhidraServer extends UnicastRemoteObject implements GhidraServerHan
 		PASSWORD_FILE_LOGIN("Password File"),
 		KRB5_AD_LOGIN("Active Directory via Kerberos"),
 		PKI_LOGIN("PKI"),
+		OIDC_LOGIN("OpenID Connect"),
 		JAAS_LOGIN("JAAS");
 
 		private String description;
@@ -114,6 +115,7 @@ public class GhidraServer extends UnicastRemoteObject implements GhidraServerHan
 				case 0: return PASSWORD_FILE_LOGIN;
 				case 1: return KRB5_AD_LOGIN;
 				case 2: return PKI_LOGIN;
+				case 3: return OIDC_LOGIN;
 				case 4: return JAAS_LOGIN;
 				default: return null;
 			}
@@ -147,13 +149,14 @@ public class GhidraServer extends UnicastRemoteObject implements GhidraServerHan
 	 * @param autoProvisionAuthedUsers flag to turn on automatically adding successfully
 	 * authenticated users to the user manager if they don't already exist
 	 * @param jaasConfigFile JAAS configuration file
+	 * @param oidcConfigFile OpenID Connect configuration file
 	 * @throws IOException if an IO error occurs
 	 * @throws CertificateException if failed to parse CA certs file used for PKI authentication
 	 */
 	GhidraServer(File rootDir, AuthMode authMode, String loginDomain,
 			boolean allowUserToSpecifyName, boolean altSSHLoginAllowed,
 			int defaultPasswordExpirationDays, boolean allowAnonymousAccess,
-			boolean autoProvisionAuthedUsers, File jaasConfigFile)
+			boolean autoProvisionAuthedUsers, File jaasConfigFile, File oidcConfigFile)
 			throws IOException, CertificateException {
 
 		super(ServerPortFactory.getRMISSLPort(), clientSocketFactory, serverSocketFactory);
@@ -193,6 +196,20 @@ public class GhidraServer extends UnicastRemoteObject implements GhidraServerHan
 			case JAAS_LOGIN:
 				authModule =
 					new JAASAuthenticationModule("auth", allowUserToSpecifyName, jaasConfigFile);
+				break;
+			case OIDC_LOGIN:
+				if (oidcConfigFile == null) {
+					throw new IllegalArgumentException("Missing OIDC config file -oidc <file>");
+				}
+				if (allowUserToSpecifyName) {
+					log.warn("User ID prompt option (-u) ignored when OIDC authentication used");
+				}
+				if (altSSHLoginAllowed) {
+					log.warn("SSH authentication option ignored when OIDC authentication used");
+					altSSHLoginAllowed = false;
+				}
+				SecureRandomFactory.getSecureRandom(); // incur initialization delay up-front
+				authModule = new OIDCAuthenticationModule(oidcConfigFile);
 				break;
 			case KRB5_AD_LOGIN:
 				if (loginDomain == null || loginDomain.isBlank()) {
@@ -547,6 +564,7 @@ public class GhidraServer extends UnicastRemoteObject implements GhidraServerHan
 		int defaultPasswordExpiration = -1;
 		boolean autoProvision = false;
 		File jaasConfigFile = null;
+		File oidcConfigFile = null;
 		String hostname = null;
 
 		// Network name resolution disabled by default
@@ -695,6 +713,28 @@ public class GhidraServer extends UnicastRemoteObject implements GhidraServerHan
 					System.exit(-1);
 				}
 			}
+			else if (s.startsWith("-oidc")) {
+				String oidcConfigFileStr;
+				if (s.length() == 5) {
+					i++;
+					oidcConfigFileStr = (i < args.length) ? args[i] : "";
+				}
+				else {
+					oidcConfigFileStr = s.substring(5);
+				}
+				oidcConfigFileStr = oidcConfigFileStr.trim();
+				if (oidcConfigFileStr.isEmpty()) {
+					displayUsage("Missing -oidc config file path argument");
+					System.exit(-1);
+				}
+				oidcConfigFile = getServerCfgFile(oidcConfigFileStr);
+				if (!oidcConfigFile.isFile()) {
+					displayUsage(
+						"OIDC config file (-oidc <configfile>) does not exist or is not file: " +
+							oidcConfigFile.getAbsolutePath());
+					System.exit(-1);
+				}
+			}
 			else if (s.equals("-autoProvision")) {
 				autoProvision = true;
 			}
@@ -725,6 +765,13 @@ public class GhidraServer extends UnicastRemoteObject implements GhidraServerHan
 		if (authMode == JAAS_LOGIN) {
 			if (jaasConfigFile == null) {
 				displayUsage("JAAS config file argument (-jaas <configfile>) not specified");
+				System.exit(-1);
+			}
+		}
+
+		if (authMode == OIDC_LOGIN) {
+			if (oidcConfigFile == null) {
+				displayUsage("OIDC config file argument (-oidc <configfile>) not specified");
 				System.exit(-1);
 			}
 		}
@@ -851,7 +898,10 @@ public class GhidraServer extends UnicastRemoteObject implements GhidraServerHan
 					(defaultPasswordExpiration == 0 ? "disabled"
 							: (defaultPasswordExpiration + " days")));
 			}
-			if (authMode != PKI_LOGIN) {
+			if (authMode == OIDC_LOGIN) {
+				log.info("   OIDC config: " + oidcConfigFile.getAbsolutePath());
+			}
+			else if (authMode != PKI_LOGIN) {
 				log.info("   Prompt for user ID: " + (nameCallbackAllowed ? "yes" : "no"));
 			}
 			if (altSSHLoginAllowed) {
@@ -884,7 +934,7 @@ public class GhidraServer extends UnicastRemoteObject implements GhidraServerHan
 
 			GhidraServer svr = new GhidraServer(serverRoot, authMode, loginDomain,
 				nameCallbackAllowed, altSSHLoginAllowed, defaultPasswordExpiration,
-				allowAnonymousAccess, autoProvision, jaasConfigFile);
+				allowAnonymousAccess, autoProvision, jaasConfigFile, oidcConfigFile);
 
 			log.info("Registering Ghidra Server...");
 

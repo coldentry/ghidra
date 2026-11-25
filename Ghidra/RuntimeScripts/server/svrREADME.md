@@ -10,6 +10,7 @@
 * [Note regarding use of DNS (name lookup service)](#note-regarding-use-of-dns-name-lookup-service)
 * [User Authentication](#user-authentication)
 * [SSH User Authentication](#ssh-user-authentication)
+* [OpenID Connect Authentication](#openid-connect-authentication)
 * [Server Options](#server-options)
 * [Running Ghidra Server on Microsoft Windows](#running-ghidra-server-on-microsoft-windows)
   * [Server Scripts](#server-scripts-located-within-the-server-subdirectory)
@@ -441,6 +442,12 @@ The Ghidra Server has been designed to support many  possible user authenticatio
   server administrator may now copy the appropriate DN from this log file when assigning the DN for
   a user.
 
+* __OpenID Connect (-a3)__: User authentication is delegated to an OpenID Connect (OIDC) identity
+  provider such as Microsoft Entra ID or Keycloak.  Users sign in with a web browser and the server
+  validates the resulting ID token.  The `-oidc <config_file>` argument is required to specify the 
+  OIDC config file (see _server/oidc.conf_).  See 
+  [OpenID Connect Authentication](#openid-connect-authentication) for configuration details.
+
 * __JAAS - Java Authentication and Authorization Service (-a4)__: User authentication is delegated 
   to the JAAS subsystem.  The -jaas `<config_file>` argument is required to specify the JAAS config
   file.  The JAAS config file supplied (_server/jaas.conf_) contains various example configurations 
@@ -507,6 +514,108 @@ key types (`-t` option) such as _ecdsa_ and _ed25519_ are not currently supporte
 
 ([Back to Top][top])
 
+## OpenID Connect Authentication
+When the `-a3` authentication mode is used, Ghidra users authenticate with an OpenID Connect (OIDC)
+identity provider.  Microsoft Entra ID and Keycloak are supported, as is any other standards
+compliant OIDC provider which supports the Authorization Code flow with PKCE for public clients.
+
+Login proceeds as follows:
+1. The Ghidra client connects to the server, which responds with the identity provider issuer, 
+   client ID and a single-use nonce.
+2. The client starts a temporary listener on the loopback interface
+   (`http://127.0.0.1:<port>/oidc/callback`) and opens the identity provider sign-in page in a web
+   browser.  Headless clients (e.g., the Headless Analyzer with `-connect`) print the sign-in URL 
+   to the console instead.
+3. After the user signs in (including any multi-factor authentication required by the identity 
+   provider) the browser is redirected to the loopback listener and the client exchanges the 
+   authorization code (with its PKCE verifier) for an ID token.
+4. The server validates the ID token signature against the identity provider's published signing
+   keys and checks its issuer, audience, expiration and nonce.  The Ghidra user name is obtained 
+   from a configurable claim (default: `preferred_username`).
+
+No client-side configuration is required; all settings are specified by the server's
+_server/oidc.conf_ file.  The server must be able to reach the identity provider's discovery
+document (`<issuer>/.well-known/openid-configuration`) and signing keys (JWKS) via https, as must
+each client in order to sign in.
+
+### Server configuration
+1. Register Ghidra Server with your identity provider (see below) as a __public__ client (no
+   client secret) with the redirect URI `http://127.0.0.1:<port>/oidc/callback`.
+2. Edit _server/oidc.conf_ and specify at least the `issuer` and `client_id` settings.  See the
+   comments within _oidc.conf_ for all available settings.
+3. Edit _server/server.conf_ and add the `-a3` and `-oidc oidc.conf` parameters, for example:
+   ```
+   wrapper.app.parameter.1=-a3
+   wrapper.app.parameter.2=-oidc
+   wrapper.app.parameter.3=oidc.conf
+   wrapper.app.parameter.4=-autoProvision
+   wrapper.app.parameter.5=${ghidra.repositories.dir}
+   ```
+4. Add users with `svrAdmin -add <username>` (where `<username>` is the user name produced from
+   the ID token claim, see `username_claim`, `strip_domain` and `lowercase_username`), or use the
+   `-autoProvision` option to automatically add users when they first successfully authenticate.
+   When `-autoProvision` is used, restrict which users may sign in using the identity provider 
+   (e.g., Entra ID "Assignment required") or the `allowed_domains` and `required_claim` settings.
+
+The server log reports the issuer, subject (and Entra ID object ID) and mapped Ghidra user name for
+each successful OIDC authentication, along with the reason for any failure.
+
+__NOTE__: If the `ghidra.cacerts` property has been specified (e.g., for PKI) it will be used 
+exclusively when verifying the identity provider's TLS certificate, so it must also include the 
+CA certificate(s) which issued the identity provider's certificate.  The same applies to clients
+which specify a `ghidra.cacerts` trust store.
+
+### Microsoft Entra ID
+1. In the Microsoft Entra admin center, create a new __App registration__ (single tenant).
+2. Under __Authentication__, add a __Mobile and desktop applications__ platform with the custom
+   redirect URI `http://127.0.0.1/oidc/callback`.  Entra ID ignores the port number of loopback
+   redirect URIs, so the default `redirect_port=0` (client chooses any available port) may be used.
+   No client secret is required.
+3. Set `issuer=https://login.microsoftonline.com/<tenant-id>/v2.0` and `client_id=<application id>`
+   in _oidc.conf_.
+4. The default `preferred_username` claim is the user principal name (e.g., `alice@contoso.com`)
+   which, with the default `strip_domain=true`, produces the Ghidra user name `alice`.  Consider
+   specifying `allowed_domains=contoso.com` to restrict sign-in to the expected domain(s).
+5. Optionally restrict access:
+   * Set __Assignment required__ on the corresponding Enterprise application and assign the
+     permitted users/groups, and/or
+   * Define an __App role__ (e.g., `Ghidra.User`), assign it to users/groups and specify
+     `required_claim=roles` and `required_claim_values=Ghidra.User`.  App roles are preferred over
+     the `groups` claim which is omitted for users who are members of too many groups.
+
+### Keycloak
+1. In the desired realm, create a new __OpenID Connect__ client (e.g., `ghidra-server`) with
+   __Client authentication__ _Off_, __Standard flow__ _On_ and __Direct access grants__ _Off_.
+2. Set __Valid redirect URIs__ to `http://127.0.0.1:<port>/oidc/callback` using a fixed port
+   (e.g., 8400) and specify the same port with `redirect_port=8400` in _oidc.conf_.
+3. Under the client's __Advanced__ settings set __Proof Key for Code Exchange Code Challenge
+   Method__ to _S256_.
+4. Set `issuer=https://<keycloak-host>/realms/<realm>` and `client_id=ghidra-server` in 
+   _oidc.conf_.  The default `preferred_username` claim is the Keycloak username.
+5. Optionally restrict access using realm roles (`required_claim=realm_access.roles`; the realm
+   roles mapper must have __Add to ID token__ enabled) or groups (add a __Group Membership__ mapper
+   with __Add to ID token__ enabled and use `required_claim=groups`).
+
+### Headless clients and SSH
+Headless clients print the sign-in URL to the console and wait (up to `login_timeout_seconds`) for
+the identity provider redirect on the loopback interface.  The browser must therefore be able to
+reach the client's `127.0.0.1:<port>`.  When the headless client is running on a remote machine,
+forward a fixed port over SSH and open the printed URL in a local browser:
+```
+ssh -L 8400:127.0.0.1:8400 user@remote-host
+```
+The client listen port is determined by the `ghidra.oidc.redirect.port` Java system property if 
+set, otherwise by the server's `redirect_port` setting.  The system property may be specified for 
+the Headless Analyzer by adding `VMARGS=-Dghidra.oidc.redirect.port=8400` to 
+_support/launch.properties_.  The chosen port must be permitted by the identity provider client
+registration (see above).
+
+__NOTE__: Scripts which specify password credentials (e.g., `GhidraScript.setServerCredentials`)
+and SSH key authentication (`-ssh`) are not applicable to OIDC authentication.  Ghidra clients
+older than the server which do not support OIDC authentication will be unable to connect.
+
+([Back to Top][top])
+
 ## Server Options
 
 ### Networking options
@@ -563,13 +672,18 @@ directory (if not absolute).
 See _jaas.conf_ for examples and suggestions. It is the system administrator's responsibility to
 craft their own JAAS configuration directive when using the `-a4` mode.
 
+#### `-oidc <config_file>`
+Specifies the path to the OpenID Connect config file (when using `-a3`), relative to the 
+ghidra/server directory (if not absolute).  See _oidc.conf_ and 
+[OpenID Connect Authentication](#openid-connect-authentication).
+
 #### `-u`
 Allows the server login user ID to be specified at time of login for `-a0` authentication mode. 
 Without this option, the users client-side login ID will be assumed.
 
 #### `-autoProvision`
 Enable the auto-creation of new Ghidra Server users when they successfully authenticate to the 
-server (`-a1` and `-a4` modes only). Users removed from the authentication provider (e.g., Active 
+server (`-a1`, `-a3` and `-a4` modes only). Users removed from the authentication provider (e.g., Active 
 Directory) will need to be deleted manually from the Ghidra Server using `svrAdmin` command.
 	
 #### `-anonymous`

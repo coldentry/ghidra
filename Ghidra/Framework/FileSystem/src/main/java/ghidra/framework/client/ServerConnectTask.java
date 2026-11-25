@@ -301,11 +301,15 @@ class ServerConnectTask extends Task {
 			callbacks = gsh.getAuthenticationCallbacks();
 
 			SignatureCallback pkiSignatureCb = null;
+			OIDCCallback oidcCb = null;
 			boolean hasSSHSignatureCallback = false;
 			if (callbacks != null) {
 				for (Callback cb : callbacks) {
 					if (cb instanceof SignatureCallback) {
 						pkiSignatureCb = (SignatureCallback) cb;
+					}
+					else if (cb instanceof OIDCCallback) {
+						oidcCb = (OIDCCallback) cb;
 					}
 					else if (cb instanceof SSHSignatureCallback) {
 						hasSSHSignatureCallback = true;
@@ -356,6 +360,13 @@ class ServerConnectTask extends Task {
 							loopOK = false; // only try once
 							ClientUtil.processSignatureCallback(server.getServerName(),
 								pkiSignatureCb);
+						}
+						else if (oidcCb != null) {
+							// OpenID Connect - server issued nonce is single-use so
+							// retry is not possible without new callbacks
+							loopOK = false;
+							ClientUtil.processOIDCCallback(server.getServerName(), oidcCb,
+								monitor);
 						}
 						else {
 							// assume all other callback scenarios are password based

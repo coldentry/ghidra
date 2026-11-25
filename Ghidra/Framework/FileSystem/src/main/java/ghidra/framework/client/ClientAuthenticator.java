@@ -16,7 +16,9 @@
 package ghidra.framework.client;
 
 import java.awt.Component;
+import java.io.IOException;
 import java.net.Authenticator;
+import java.net.URI;
 
 import javax.security.auth.callback.*;
 
@@ -88,5 +90,25 @@ public interface ClientAuthenticator extends KeyStorePasswordProvider {
 	 */
 	public boolean processSSHSignatureCallbacks(String serverName, NameCallback nameCb,
 			SSHSignatureCallback sshCb);
+
+	/**
+	 * Present an OpenID Connect authorization request to the user so that they may sign in
+	 * with the identity provider used by a Ghidra Server.  This method should not block
+	 * waiting for the sign-in to complete; completion is detected via the loopback redirect
+	 * listening on the specified port.
+	 * <p>
+	 * The default implementation prints the authorization URI to the console.
+	 * 
+	 * @param serverName name of server
+	 * @param authorizationUri identity provider authorization request URI which should be
+	 * opened in a web browser
+	 * @param redirectPort loopback ({@code 127.0.0.1}) port on which the client is awaiting
+	 * the identity provider redirect
+	 * @throws IOException if the request could not be presented and login should be aborted
+	 */
+	public default void openOIDCAuthorizationUri(String serverName, URI authorizationUri,
+			int redirectPort) throws IOException {
+		OIDCLoginClient.printLoginInstructions(serverName, authorizationUri, redirectPort);
+	}
 
 }

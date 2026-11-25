@@ -16,6 +16,8 @@
 package ghidra.framework.client;
 
 import java.awt.Component;
+import java.awt.Desktop;
+import java.io.IOException;
 import java.net.*;
 
 import javax.security.auth.callback.*;
@@ -24,10 +26,12 @@ import org.apache.commons.lang3.StringUtils;
 
 import docking.DockingWindowManager;
 import docking.widgets.*;
+import docking.widgets.dialogs.ReadTextDialog;
 import ghidra.framework.preferences.Preferences;
 import ghidra.framework.remote.AnonymousCallback;
 import ghidra.framework.remote.SSHSignatureCallback;
 import ghidra.util.Msg;
+import ghidra.util.Swing;
 import ghidra.util.SystemUtilities;
 
 public class DefaultClientAuthenticator extends PopupKeyStorePasswordProvider
@@ -147,6 +151,31 @@ public class DefaultClientAuthenticator extends PopupKeyStorePasswordProvider
 			allowUserNameEntry, nameCb, passCb, choiceCb, anonymousCb, loginError);
 		SystemUtilities.runSwingNow(pp);
 		return pp.okWasPressed();
+	}
+
+	@Override
+	public void openOIDCAuthorizationUri(String serverName, URI authorizationUri,
+			int redirectPort) throws IOException {
+		Msg.info(this, "Opening web browser for OpenID Connect sign-in to " + serverName);
+		if (Desktop.isDesktopSupported() &&
+			Desktop.getDesktop().isSupported(Desktop.Action.BROWSE)) {
+			try {
+				Desktop.getDesktop().browse(authorizationUri);
+				return;
+			}
+			catch (IOException | UnsupportedOperationException | SecurityException e) {
+				Msg.warn(this, "Failed to open web browser: " + e.getMessage());
+			}
+		}
+		// Unable to launch browser - allow user to copy URL.  Dialog must not block since
+		// the connect task must continue waiting for the redirect.
+		String text = "Unable to open a web browser.  To sign in to Ghidra Server " +
+			serverName + ", open the following URL in a web browser on this machine:\n\n" +
+			authorizationUri + "\n";
+		Swing.runLater(() -> {
+			ReadTextDialog dlg = new ReadTextDialog("OpenID Connect Sign-In", text);
+			DockingWindowManager.showDialog(null, dlg);
+		});
 	}
 
 	@Override

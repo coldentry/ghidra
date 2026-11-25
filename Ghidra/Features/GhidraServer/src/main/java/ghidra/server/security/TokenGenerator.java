@@ -23,23 +23,37 @@ import generic.random.SecureRandomFactory;
 
 public class TokenGenerator {
 
-	private static final long MAX_TTL_MS = 60_000; // max token time-to-live 60s
+	private static final long DEFAULT_TTL_MS = 60_000; // default token time-to-live 60s
 
 	private static final int TOKEN_SIZE = 64;
 
 	private static CachedTokenSet tokenCache = new CachedTokenSet();
 
 	/**
-	 * {@return a single-use token byte sequence with embedded timestamp}
+	 * {@return a single-use token byte sequence with embedded timestamp which will remain
+	 * valid for the default time-to-live (60 seconds)}
 	 */
 	static byte[] getNewToken() {
+		return getNewToken(DEFAULT_TTL_MS);
+	}
+
+	/**
+	 * Get a single-use token byte sequence with embedded timestamp which will remain valid
+	 * for the specified time-to-live.
+	 * @param ttlMs token time-to-live in milliseconds
+	 * @return token bytes
+	 */
+	static byte[] getNewToken(long ttlMs) {
+		if (ttlMs <= 0) {
+			throw new IllegalArgumentException("ttlMs must be positive");
+		}
 		SecureRandom random = SecureRandomFactory.getSecureRandom();
 		byte[] token = new byte[TOKEN_SIZE - 8];
 		random.nextBytes(token);
 		byte[] stampedToken = new byte[TOKEN_SIZE];
 		System.arraycopy(token, 0, stampedToken, 8, token.length);
 		putLong(stampedToken, 0, (new Date()).getTime());
-		tokenCache.add(stampedToken);
+		tokenCache.add(stampedToken, ttlMs);
 		return stampedToken;
 	}
 
@@ -60,8 +74,9 @@ public class TokenGenerator {
 		if (issueTime <= 0) {
 			return false;
 		}
+		// expiration is enforced by token cache
 		long diff = (new Date()).getTime() - issueTime;
-		return (diff >= 0 && diff < MAX_TTL_MS);
+		return diff >= 0;
 	}
 
 	private static long getLong(byte[] data, int offset) {
@@ -117,7 +132,8 @@ public class TokenGenerator {
 
 	/**
 	 * {@link CachedTokenSet} tracks timed token issuance and insures that they remain
-	 * valid for one-time consumption within limited life-span.
+	 * valid for one-time consumption within limited life-span.  Each token is stored
+	 * with its expiration time.
 	 */
 	private static class CachedTokenSet {
 
@@ -130,20 +146,20 @@ public class TokenGenerator {
 			scheduler.scheduleAtFixedRate(this::cleanup, 5, 5, TimeUnit.SECONDS);
 		}
 
-		void add(byte[] token) {
-			cache.put(new Token(token), System.currentTimeMillis());
+		void add(byte[] token, long ttlMs) {
+			cache.put(new Token(token), System.currentTimeMillis() + ttlMs);
 		}
 
 		boolean consume(byte[] token) {
-			Long storedAt = cache.remove(new Token(token)); // remove on retrieval
-			if (storedAt == null)
+			Long expiresAt = cache.remove(new Token(token)); // remove on retrieval
+			if (expiresAt == null)
 				return false;
-			return (System.currentTimeMillis() - storedAt < MAX_TTL_MS);
+			return System.currentTimeMillis() < expiresAt;
 		}
 
 		private void cleanup() {
 			long now = System.currentTimeMillis();
-			cache.entrySet().removeIf(e -> now - e.getValue() >= MAX_TTL_MS);
+			cache.entrySet().removeIf(e -> now >= e.getValue());
 		}
 	}
 }

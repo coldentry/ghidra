@@ -517,6 +517,16 @@ public class ClientUtil {
 		}
 	}
 
+	static void processOIDCCallback(String serverName, OIDCCallback oidcCb, TaskMonitor monitor)
+			throws IOException, CancelledException {
+		Msg.info(ClientUtil.class, "OpenID Connect authenticating to " + serverName +
+			" using identity provider " + oidcCb.getIssuer());
+		OIDCLoginClient loginClient = new OIDCLoginClient(oidcCb);
+		loginClient.login((uri, port) -> getClientAuthenticator()
+				.openOIDCAuthorizationUri(serverName, uri, port),
+			monitor);
+	}
+
 	static boolean processSSHSignatureCallback(Callback[] callbacks, String serverName,
 			String defaultUserID) {
 		NameCallback nameCb = null;
